@@ -9,7 +9,7 @@ The module provides a python class named
 powerswitch that allows managing the web power
 switch from python programs.
 
-When run as a script this acts as a command line utility to 
+When run as a script this acts as a command line utility to
 manage the DLI Power switch.
 
 Notes
@@ -98,8 +98,6 @@ Outlet	Name           	State
 8	Cable Modem1   	OFF
 """
 
-from __future__ import print_function
-
 import hashlib
 import json
 import logging
@@ -110,8 +108,9 @@ import time
 import requests
 import requests.exceptions
 import urllib3
+from urllib.parse import quote
+
 from bs4 import BeautifulSoup
-from six.moves.urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -326,7 +325,11 @@ class PowerSwitch(object):
         self.secure_login = False
         self.session = requests.Session()
         try:
-            response = self.session.get(self.base_url, verify=False, timeout=self.login_timeout)
+            response = self.session.get(self.base_url, verify=False, timeout=self.login_timeout, allow_redirects=False)
+            if response.is_redirect:
+                self.base_url = response.headers['Location'].rstrip('/')
+                logger.debug(f'Redirecting to: {self.base_url}')
+                response = self.session.get(self.base_url, verify=False, timeout=self.login_timeout)
         except (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError):
             self.session = None
             return
@@ -343,9 +346,9 @@ class PowerSwitch(object):
 
         form_response = fields['Challenge'] + fields['Username'] + fields['Password'] + fields['Challenge']
 
-        m = hashlib.md5()
+        m = hashlib.md5()  # nosec - The switch we are talking to uses md5 hashes
         m.update(form_response.encode())
-        data = {'Username': 'admin', 'Password': m.hexdigest()}
+        data = {'Username': self.userid, 'Password': m.hexdigest()}
         headers = {'Content-Type': 'application/x-www-form-urlencoded'}
 
         try:
@@ -389,7 +392,8 @@ class PowerSwitch(object):
         file_h = open(CONFIG_FILE, 'w')
         # Make sure the file perms are correct before we write data
         # that can include the password into it.
-        os.fchmod(file_h.fileno(), 0o0600)
+        if hasattr(os, 'fchmod'):
+            os.fchmod(file_h.fileno(), 0o0600)
         if file_h:
             json.dump(config, file_h, sort_keys=True, indent=4)
             file_h.close()
@@ -403,19 +407,19 @@ class PowerSwitch(object):
         return False
 
     def geturl(self, url='index.htm'):
-        """ Get a URL from the userid/password protected powerswitch page
-            Return None on failure
+        """
+        Get a URL from the userid/password protected powerswitch page Return None on failure
         """
         full_url = "%s/%s" % (self.base_url, url)
         result = None
         request = None
+        logger.debug(f'Requesting url: {full_url}')
         for i in range(0, self.retries):
             try:
                 if self.secure_login and self.session:
-                    request = self.session.get(full_url, timeout=self.timeout, verify=False)
+                    request = self.session.get(full_url, timeout=self.timeout, verify=False, allow_redirects=True)
                 else:
-                    request = requests.get(full_url, auth=(self.userid, self.password,), timeout=self.timeout,
-                                           verify=False)
+                    request = requests.get(full_url, auth=(self.userid, self.password,), timeout=self.timeout, verify=False, allow_redirects=True)  # nosec
             except requests.exceptions.RequestException as e:
                 logger.warning("Request timed out - %d retries left.", self.retries - i - 1)
                 logger.exception("Caught exception %s", str(e))
@@ -423,7 +427,9 @@ class PowerSwitch(object):
             if request.status_code == 200:
                 result = request.content
                 break
-        logger.debug('Response code: %s', request.status_code)
+        if request is not None:
+            logger.debug('Response code: %s', request.status_code)
+        logger.debug(f'Response content: {result}')
         return result
 
     def determine_outlet(self, outlet=None):
@@ -432,11 +438,16 @@ class PowerSwitch(object):
             returned outlet is an int
         """
         outlets = self.statuslist()
-        if outlet and outlets and isinstance(outlet, str):
+        if outlet and outlets and (isinstance(outlet, str) or isinstance(outlet, int)):
             for plug in outlets:
                 plug_name = plug[1]
-                if plug_name and plug_name.strip() == outlet.strip():
-                    return int(plug[0])
+                plug_number = int(plug[0])
+                if isinstance(outlet, str):
+                    if plug_name and plug_name.strip() == outlet.strip():
+                        return plug_number
+                elif isinstance(outlet, int):
+                    if plug_number and plug_number == outlet:
+                        return plug_number
         try:
             outlet_int = int(outlet)
             if outlet_int <= 0 or outlet_int > self.__len__():
@@ -481,15 +492,12 @@ class PowerSwitch(object):
 
     def cycle(self, outlet=0):
         """ Cycle power to an outlet
-            False = Power off Success
-            True = Power off Fail
-            Note, does not return any status info about the power on part of
-            the operation by design
+            Note: If an outlet is powered off, it will turn it on
         """
-        if self.off(outlet):
-            return True
-        time.sleep(self.cycletime)
-        self.on(outlet)
+        if self.status(outlet) == 'OFF':
+            self.on(outlet)
+        else:
+            self.geturl(url='outlet?%d=CCL' % self.determine_outlet(outlet))
         return False
 
     def statuslist(self):
@@ -506,7 +514,7 @@ class PowerSwitch(object):
         except IndexError:
             # Finding the root of the table with the outlet info failed
             # try again assuming we're seeing the table for a user
-            # account insteaed of the admin account (tables are different)
+            # account instead of the admin account (tables are different)
             try:
                 self._is_admin = False
                 root = soup.findAll('th', text='#')[0].parent.parent.parent

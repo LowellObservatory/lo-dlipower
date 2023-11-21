@@ -3,10 +3,16 @@
 # See the accompanying LICENSE.txt file for terms.
 
 from .dlipower import Outlet, PowerSwitch, DLIPowerException
+
+try:
+    import pkg_resources
+    __version__ = pkg_resources.get_distribution("dlipower").version
+except ImportError:
+    __version__ = str('0.0.0')
 import json
 import os
 
-__version__ = str('0.0.0')
+__all__ = ['dlipower']
 __git_version__ = str("")
 __git_origin__ = str("")
 __git_branch__ = str("")
