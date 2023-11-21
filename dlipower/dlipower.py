@@ -99,22 +99,21 @@ Outlet	Name           	State
 """
 
 import hashlib
+import json
 import logging
 import multiprocessing
 import os
-import json
+import time
+
 import requests
 import requests.exceptions
-import time
 import urllib3
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 
-
 logger = logging.getLogger(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 
 # Global settings
 TIMEOUT = 20
@@ -130,7 +129,7 @@ CONFIG_DEFAULTS = {
 CONFIG_FILE = os.path.expanduser('~/.dlipower.conf')
 
 
-def _call_it(params):   # pragma: no cover
+def _call_it(params):  # pragma: no cover
     """indirect caller for instance methods and multiprocessing"""
     instance, name, args = params
     kwargs = {}
@@ -229,7 +228,7 @@ class PowerSwitch(object):
     def __init__(self, userid=None, password=None, hostname=None, timeout=None,
                  cycletime=None, retries=None, use_https=False):
         """
-        Class initializaton
+        Class initialisation
         """
         if not retries:
             retries = RETRIES
@@ -353,8 +352,9 @@ class PowerSwitch(object):
         headers = {'Content-Type': 'application/x-www-form-urlencoded'}
 
         try:
-            response = self.session.post('%s/login.tgi' % self.base_url, headers=headers, data=data, timeout=self.timeout, verify=False)
-        except requests.exceptions.ConnectTimeout:
+            response = self.session.post('%s/login.tgi' % self.base_url, headers=headers, data=data,
+                                         timeout=self.timeout, verify=False)
+        except (requests.exceptions.ConnectTimeout, requests.exceptions.ChunkedEncodingError):
             self.secure_login = False
             self.session = None
             return
@@ -363,7 +363,8 @@ class PowerSwitch(object):
             if 'Set-Cookie' in response.headers:
                 self.secure_login = True
 
-    def load_configuration(self):
+    @staticmethod
+    def load_configuration():
         """ Return a configuration dictionary """
         if os.path.isfile(CONFIG_FILE):
             file_h = open(CONFIG_FILE, 'r')
@@ -426,7 +427,8 @@ class PowerSwitch(object):
             if request.status_code == 200:
                 result = request.content
                 break
-        logger.debug('Response code: %s', request.status_code)
+        if request is not None:
+            logger.debug('Response code: %s', request.status_code)
         logger.debug(f'Response content: {result}')
         return result
 
@@ -436,11 +438,16 @@ class PowerSwitch(object):
             returned outlet is an int
         """
         outlets = self.statuslist()
-        if outlet and outlets and isinstance(outlet, str):
+        if outlet and outlets and (isinstance(outlet, str) or isinstance(outlet, int)):
             for plug in outlets:
                 plug_name = plug[1]
-                if plug_name and plug_name.strip() == outlet.strip():
-                    return int(plug[0])
+                plug_number = int(plug[0])
+                if isinstance(outlet, str):
+                    if plug_name and plug_name.strip() == outlet.strip():
+                        return plug_number
+                elif isinstance(outlet, int):
+                    if plug_number and plug_number == outlet:
+                        return plug_number
         try:
             outlet_int = int(outlet)
             if outlet_int <= 0 or outlet_int > self.__len__():
@@ -485,15 +492,12 @@ class PowerSwitch(object):
 
     def cycle(self, outlet=0):
         """ Cycle power to an outlet
-            False = Power off Success
-            True = Power off Fail
-            Note, does not return any status info about the power on part of
-            the operation by design
+            Note: If an outlet is powered off, it will turn it on
         """
-        if self.off(outlet):
-            return True
-        time.sleep(self.cycletime)
-        self.on(outlet)
+        if self.status(outlet) == 'OFF':
+            self.on(outlet)
+        else:
+            self.geturl(url='outlet?%d=CCL' % self.determine_outlet(outlet))
         return False
 
     def statuslist(self):
@@ -510,7 +514,7 @@ class PowerSwitch(object):
         except IndexError:
             # Finding the root of the table with the outlet info failed
             # try again assuming we're seeing the table for a user
-            # account insteaed of the admin account (tables are different)
+            # account instead of the admin account (tables are different)
             try:
                 self._is_admin = False
                 root = soup.findAll('th', text='#')[0].parent.parent.parent
@@ -567,7 +571,7 @@ class PowerSwitch(object):
         result = [
             value for value in pool.imap(
                 _call_it,
-                [(self, command, (outlet, )) for outlet in outlets],
+                [(self, command, (outlet,)) for outlet in outlets],
                 chunksize=1
             )
         ]
