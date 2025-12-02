@@ -4,12 +4,12 @@
 
 from .dlipower import Outlet, PowerSwitch, DLIPowerException
 
-import pkg_resources
+import importlib.metadata
 import json
 import os
 
 __all__ = ["dlipower"]
-__version__ = pkg_resources.get_distribution("dlipower").version
+__version__ = importlib.metadata.version("dlipower")
 __git_version__ = str("")
 __git_origin__ = str("")
 __git_branch__ = str("")
